@@ -14,7 +14,7 @@
     GEMINI_API_KEY="..."
     ```
 3. **Download and Set Up Data**
-* [Download Data](https://drive.google.com/drive/folders/1iM-lVNrdHGSzze7ElzPqyLqL9Krw2j1N?usp=sharing)
+* [Download Data](https://drive.google.com/file/d/19CS-zKRhniztrtDUTSfL2wmeyzqIfR3P/view?usp=sharing)
 * Unzip the file you just downloaded. You will find two subfolders: `parsed_json_output` and `chroma_db`.
 * Copy both of these folders and paste them into the project's `data` directory.
   
