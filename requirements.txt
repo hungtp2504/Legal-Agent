@@ -1,0 +1,12 @@
+langchain
+langchain-core
+langchain-google-genai
+langgraph
+chromadb
+sentence-transformers
+torch
+streamlit
+beautifulsoup4
+lxml
+tqdm
+pydantic-settings
