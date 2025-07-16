@@ -151,12 +151,26 @@ cython_debug/
 .vscode/
 
 .env
-get_tree.py
 data
 logs
 scripts
 main.py
 .isort.cfg
-Dockerfile
-docker-compose.yml
-.dockerignore
+
+# Langfuse
+.langfuse/
+
+# Data and Logs from project
+/data/
+/logs/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+get.py
+get.txt

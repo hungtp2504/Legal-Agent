@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+langchain
+langchain-openai
+langgraph
+sentence-transformers
+torch
+chromadb
+lxml
+beautifulsoup4
+langfuse
+requests
+sse-starlette
+python-dotenv

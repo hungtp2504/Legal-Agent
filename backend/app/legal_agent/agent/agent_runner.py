@@ -1,38 +1,47 @@
-import asyncio
 import glob
 import json
 import logging
 import os
 import re
+from functools import lru_cache
 from uuid import uuid4
 
-from langchain_core.prompts import PromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
+from langfuse import Langfuse
+from langfuse.langchain import CallbackHandler
 
+from ...core.settings import settings
 from ..tools.vector_retriever import VectorRetriever
 from .agent_graph import build_agent_graph
 from .prompt import (
-    FactAnalysisPrompt,
-    FinalReasoningPrompt,
-    FrameworkGenerationPrompt,
-    KeywordExtractionPrompt,
-    ResponseGenerationPrompt,
-    RouterPrompt,
-    SimpleKeywordExtractionPrompt,
+    FactAnalysisPrompt, FinalReasoningPrompt, FrameworkGenerationPrompt,
+    KeywordExtractionPrompt, ResponseGenerationPrompt, RouterPrompt,
+    SimpleKeywordExtractionPrompt, SimpleRAGPrompt
 )
 from .state import AgentState
 
 logger = logging.getLogger(__name__)
 
+@lru_cache(maxsize=1)
+def get_agent_runner():
+    logger.info(f"Initializing or retrieving cached LegalAgentRunner.")
+    return LegalAgentRunner(settings=settings)
 
 class LegalAgentRunner:
-    def __init__(self, settings, api_key: str):
-        logger.info("Initializing LegalAgentRunner...")
+    def __init__(self, settings):
+        self.settings = settings
+        if settings.LANGFUSE_SECRET_KEY and settings.LANGFUSE_PUBLIC_KEY:
+            self.langfuse = Langfuse(
+                secret_key=settings.LANGFUSE_SECRET_KEY,
+                public_key=settings.LANGFUSE_PUBLIC_KEY,
+                host=settings.LANGFUSE_HOST,
+            )
 
-        self.llm = ChatGoogleGenerativeAI(
+        self.llm = ChatOpenAI(
             model=settings.LLM_MODEL_NAME,
-            google_api_key=api_key,
+            openai_api_key=self.settings.OPENAI_API_KEY,
             temperature=0,
+            streaming=True,
         )
 
         self.vector_retriever = VectorRetriever(settings)
@@ -48,7 +57,7 @@ class LegalAgentRunner:
         for filepath in json_files:
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                doc_name = data.get("document", {}).get("name", "Không rõ tên văn bản")
+                doc_name = data.get("document", {}).get("name", "Unknown Document")
                 for unit in data.get("units", []):
                     unit["document_name"] = doc_name
                     all_units[unit["id"]] = unit
@@ -56,24 +65,29 @@ class LegalAgentRunner:
         return all_units
 
     async def stream_run(self, query: str):
-        config_run = {"configurable": {"thread_id": str(uuid4())}}
+        session_id = str(uuid4())
         initial_state = {"original_query": query}
+        
+        callbacks = []
+        if hasattr(self, 'langfuse'):
+            langfuse_handler = CallbackHandler()
+            callbacks.append(langfuse_handler)
 
-        async for event in self.app.astream_events(initial_state, version="v1"):
+        config = {"configurable": {"thread_id": session_id}, "callbacks": callbacks}
+
+        async for event in self.app.astream_events(initial_state, config=config, version="v1"):
             kind = event["event"]
-
-            if kind == "on_chain_start" and event["name"] != "LangGraph":
-                yield {"type": "log", "data": f"--- Bắt đầu: {event['name']} ---"}
-
-            if kind == "on_chain_end" and event["name"] != "LangGraph":
-                yield {
-                    "type": "node_result",
-                    "node_name": event["name"],
-                    "data": event["data"].get("output"),
-                }
-
+            
+            if kind == "on_chain_end":
+                node_name = event["name"]
+                if node_name not in ["LangGraph", "responder", "simple_rag"]:
+                    yield {
+                        "type": "node_result",
+                        "node_name": node_name,
+                        "data": event["data"].get("output"),
+                    }
+            
             if kind == "on_chat_model_stream":
-
                 if "final_answer" in event["tags"]:
                     content = event["data"]["chunk"].content
                     if content:
@@ -83,41 +97,22 @@ class LegalAgentRunner:
         prompt = RouterPrompt.format(query=state["original_query"])
         response = self.llm.invoke(prompt)
         route = response.content.strip().lower()
-        if route not in ["case_analysis", "simple_rag"]:
+        if "case_analysis" in route:
+            route = "case_analysis"
+        else: 
             route = "simple_rag"
+
         return {"route_decision": route}
 
-    def simple_rag_node(self, state: AgentState) -> dict:
-        context_str = state.get("retrieved_context", "[]")
-        query = state["original_query"]
-
-        rag_prompt_template = PromptTemplate.from_template(
-            "Bạn là một trợ lý pháp lý AI. Dựa vào các thông tin pháp lý được cung cấp dưới đây, hãy trả lời câu hỏi của người dùng một cách chính xác và dễ hiểu. Nếu thông tin không đủ, hãy nói rõ là không tìm thấy thông tin.\n\n"
-            "Thông tin pháp lý tham khảo:\n{context}\n\n"
-            "Câu hỏi của người dùng:\n{query}\n\n"
-            "Câu trả lời của bạn:"
-        )
-        prompt = rag_prompt_template.format(context=context_str, query=query)
-        response = self.llm.with_config(tags=["final_answer"]).invoke(prompt)
-        return {"final_response": response.content}
-
     def simple_keyword_extractor_node(self, state: AgentState) -> dict:
-        """Trích xuất từ khóa từ một câu hỏi đơn giản."""
         prompt = SimpleKeywordExtractionPrompt.format(query=state["original_query"])
         response_text = self.llm.invoke(prompt).content
-        keywords = []
         try:
             match = re.search(r"```json\s*([\s\S]*?)\s*```", response_text)
             json_str = match.group(1) if match else response_text
-            parsed_json = json.loads(json_str)
-            if isinstance(parsed_json, list):
-                keywords = parsed_json
+            keywords = json.loads(json_str)
         except (json.JSONDecodeError, AttributeError):
-
             keywords = [state["original_query"]]
-            logger.warning(
-                f"Failed to decode keywords for simple_rag. Falling back to original query."
-            )
         return {"extracted_keywords": keywords}
 
     def analyze_case_node(self, state: AgentState) -> dict:
@@ -136,42 +131,44 @@ class LegalAgentRunner:
             reasoning_framework=state["reasoning_framework"],
         )
         response_text = self.llm.invoke(prompt).content
-        keywords = []
         try:
             match = re.search(r"```json\s*([\s\S]*?)\s*```", response_text)
             json_str = match.group(1) if match else response_text
-            parsed_json = json.loads(json_str)
-            if isinstance(parsed_json, list):
-                keywords = parsed_json
+            keywords = json.loads(json_str)
         except (json.JSONDecodeError, AttributeError):
-            logger.warning(f"Failed to decode keywords from LLM response.")
+            keywords = []
         return {"extracted_keywords": keywords}
 
     def information_retrieval_node(self, state: AgentState) -> dict:
-
         keywords = state.get("extracted_keywords", [])
-        if not keywords:
-            return {"retrieved_context": "[]"}
-        initial_hits = []
+        if not keywords: return {"retrieved_context": "[]"}
+        
+        unique_hits = {}
         for k in keywords:
-            initial_hits.extend(self.vector_retriever.search(k, n_results=1))
-        parent_article_ids = set()
-        for hit in initial_hits:
-            if not hit or "id" not in hit:
-                continue
-            match = re.search(r"(_điều-[\w.-]+)", hit["id"])
-            if match:
-                parent_article_ids.add(hit["id"][: match.end()])
-        hydrated_context_units = []
-        retrieved_ids = set()
-        for article_id in parent_article_ids:
-            for unit_id, unit_data in self.units_map.items():
-                if unit_id.startswith(article_id) and unit_id not in retrieved_ids:
-                    hydrated_context_units.append(unit_data)
-                    retrieved_ids.add(unit_id)
-        context_json_str = json.dumps(
-            hydrated_context_units, indent=2, ensure_ascii=False
-        )
+            search_results = self.vector_retriever.search(k, n_results=3)
+            for hit in search_results:
+                if hit['id'] not in unique_hits:
+                    unique_hits[hit['id']] = hit
+
+        sorted_hits = sorted(unique_hits.values(), key=lambda x: x['similarity'], reverse=True)
+
+        context_json_str = json.dumps(sorted_hits, indent=2, ensure_ascii=False)
+        
+        # parent_article_ids = set()
+        # for hit in sorted_hits:
+        #       match = re.search(r"(_điều-[\w.-]+)", hit["id"])
+        #       if match:
+        #           parent_article_ids.add(hit["id"][: match.end()])
+        # # print("----------------------------------------------------------------------------------------------len(parent_article_ids): ",len(parent_article_ids), parent_article_ids)
+        # hydrated_context_units = []
+        # retrieved_ids = set()
+        # for article_id in parent_article_ids:
+        #     for unit_id, unit_data in self.units_map.items():
+        #         if unit_id.startswith(article_id) and unit_id not in retrieved_ids:
+        #             hydrated_context_units.append(unit_data)
+        #             retrieved_ids.add(unit_id)
+        # # print("----------------------------------------------------------------------------------------------len(hydrated_context_units): ",len(hydrated_context_units), hydrated_context_units)
+        # context_json_str = json.dumps(hydrated_context_units, indent=2, ensure_ascii=False)
         return {"retrieved_context": context_json_str}
 
     def final_reasoning_node(self, state: AgentState) -> dict:
@@ -188,6 +185,10 @@ class LegalAgentRunner:
             final_analysis=state["final_analysis"],
             retrieved_context=state["retrieved_context"],
         )
+        response = self.llm.with_config(tags=["final_answer"]).invoke(prompt)
+        return {"final_response": response.content}
 
+    def simple_rag_node(self, state: AgentState) -> dict:
+        prompt = SimpleRAGPrompt.format(context=state["retrieved_context"], query=state["original_query"])
         response = self.llm.with_config(tags=["final_answer"]).invoke(prompt)
         return {"final_response": response.content}
