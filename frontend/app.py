@@ -10,7 +10,6 @@ STREAM_ENDPOINT = f"{BACKEND_URL}/api/v1/chat/stream"
 st.set_page_config(page_title="LegalAgent Chatbot", page_icon="⚖️", layout="wide")
 
 def stream_from_backend(query: str):
-    
     payload = {"query": query}
     try:
         with requests.post(STREAM_ENDPOINT, json=payload, stream=True, timeout=600) as response:
@@ -66,16 +65,6 @@ def format_and_render_step(container, node_name, raw_data):
 
 st.title("⚖️ Trợ lý Pháp lý AI")
 
-'''
-Sidebar
-with st.sidebar:
-    st.header("Cấu hình")
-    st.info(
-        "API Key được cấu hình ở phía backend thông qua tệp `.env`."
-        " Vui lòng cập nhật key trong tệp đó và khởi động lại nếu cần."
-    )
-    st.markdown("---")
-'''
 
 
 if "messages" not in st.session_state:

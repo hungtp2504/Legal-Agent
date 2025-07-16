@@ -1,0 +1,25 @@
+# backend/.dockerignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv
+.venv
+env
+
+# Git
+.git
+.gitignore
+
+# IDE/Editor
+.vscode
+.idea
+
+data/
+logs/
+*.log
+
+.env
+

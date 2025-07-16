@@ -4,7 +4,9 @@ from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT_DIR", Path.cwd()))
+
 load_dotenv(PROJECT_ROOT / ".env")
 
 class Settings(BaseSettings):
